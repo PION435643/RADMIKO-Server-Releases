@@ -1,0 +1,39 @@
+name: Linux server and Docker smoke
+on: [push, workflow_dispatch]
+permissions: {}
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Verify and unpack server
+        run: |
+          curl -fL --retry 3 -o server.zip https://github.com/PION435643/RADMIKO-Server-Releases/releases/download/0.11.5.53-hf9-preview/RADMIKO-Server-Linux-P113-preview.zip
+          echo 'a66527f14b39d421b7e7d104aa7dcd308ab9c449c7727785fbf6b4a53ed79f06  server.zip' | sha256sum -c -
+          unzip -q server.zip -d package
+          docker build -t radmiko-test package
+      - name: Persistent slot initialization
+        run: |
+          mkdir data
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/data:/data" radmiko-test --admin TestAdmin --slot main --init
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/data:/data" radmiko-test --admin TestAdmin --slot second --init
+          test -f data/slots/main/settings.toml
+          test -f data/slots/second/settings.toml
+          test "$(stat -c %a data/slots/main/settings.toml)" = 600
+      - name: UDP startup and SIGTERM shutdown
+        run: |
+          docker run -d --name radmiko-smoke --user "$(id -u):$(id -g)" -v "$PWD/data:/data" radmiko-test --slot main
+          ready=0
+          for n in $(seq 1 30); do
+            if docker logs radmiko-smoke 2>&1 | grep -q 'READY UDP'; then ready=1; break; fi
+            sleep 1
+          done
+          docker logs radmiko-smoke
+          test "$ready" = 1
+          docker stop --time 30 radmiko-smoke
+          test "$(docker inspect -f '{{.State.ExitCode}}' radmiko-smoke)" = 0
+          docker logs radmiko-smoke 2>&1 | grep 'RADMIKO Linux STOPPED'
+          if docker logs radmiko-smoke 2>&1 | grep -E 'Exception ticking|Exception stopping'; then exit 1; fi
+      - name: Diagnostics
+        if: always()
+        run: docker logs radmiko-smoke 2>&1 || true
